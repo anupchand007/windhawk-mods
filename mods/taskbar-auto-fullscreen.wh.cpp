@@ -91,6 +91,9 @@ Based on the excellent "Primary taskbar on secondary monitor" mod by m417z (http
 - pollInterval: 2000
   $name: Poll Interval (milliseconds)
   $description: How often to check for fullscreen applications. Higher values use less CPU. Recommended range is 2000-3000ms (2-3 seconds).
+- restartExplorerForDPI: false
+  $name: Restart Explorer for DPI Fix
+  $description: If your monitors have different DPI/scaling settings and taskbar icons become blurry, enable this. Warning - causes a brief screen flicker when taskbar moves.
 - enableLogging: false
   $name: Enable Debug Logging
   $description: Enable detailed logging for troubleshooting. Disable this for best performance during gaming. Logs can be viewed in Windhawk's log viewer or with DbgView.
@@ -99,10 +102,12 @@ Based on the excellent "Primary taskbar on secondary monitor" mod by m417z (http
 
 #include <windhawk_utils.h>
 #include <atomic>
+#include <cstdlib>
 
 struct {
     int secondaryMonitor;
     int pollInterval;
+    bool restartExplorerForDPI;
     bool enableLogging;
 } g_settings;
 
@@ -277,8 +282,26 @@ void ApplyTaskbarSettings() {
     }
     
     if (g_taskbarHwnd) {
+        // Make sure taskbar is visible before triggering change
+        ShowWindow(g_taskbarHwnd, SW_SHOW);
+        
         // Trigger CTray::_HandleDisplayChange
         SendMessage(g_taskbarHwnd, 0x5B8, 0, 0);
+        
+        // If DPI fix is enabled, restart Explorer to properly handle scaling
+        if (g_settings.restartExplorerForDPI) {
+            Log(L"Restarting Explorer for DPI fix");
+            
+            // Small delay to let taskbar settle
+            Sleep(100);
+            
+            // Restart Explorer process to fix DPI/scaling issues
+            system("taskkill /f /im explorer.exe & start explorer.exe");
+        } else {
+            // Force taskbar refresh to prevent disappearing
+            InvalidateRect(g_taskbarHwnd, nullptr, TRUE);
+            UpdateWindow(g_taskbarHwnd);
+        }
     }
 }
 
@@ -299,6 +322,11 @@ DWORD WINAPI MonitorThreadFunc(LPVOID lpParam) {
     while (g_running) {
         iteration++;
         
+        // Periodically refresh monitor list to handle monitor changes
+        if (iteration % 300 == 1) { // Every ~10 minutes
+            RefreshMonitors();
+        }
+        
         // Only log every 60 iterations to reduce log spam
         if (iteration % 60 == 1) {
             wchar_t msg[100];
@@ -313,8 +341,12 @@ DWORD WINAPI MonitorThreadFunc(LPVOID lpParam) {
             // The fullscreen app was closed!
             Log(L">>> FULLSCREEN APP CLOSED - RESTORING TASKBAR TO PRIMARY");
             g_fullscreenApp = nullptr;
-            g_forceSecondary = false;
-            ApplyTaskbarSettings();
+            
+            // Double-check monitors are still valid before restoring
+            if (g_primaryMonitor && IsWindow(g_taskbarHwnd)) {
+                g_forceSecondary = false;
+                ApplyTaskbarSettings();
+            }
         }
         
         // Optimization: Only check fullscreen status if foreground window changed
@@ -332,9 +364,15 @@ DWORD WINAPI MonitorThreadFunc(LPVOID lpParam) {
                 swprintf(msg, 300, L">>> FULLSCREEN: %s", title[0] ? title : L"<no title>");
                 Log(msg);
                 
-                g_fullscreenApp = hWnd;  // Track this app
-                g_forceSecondary = true;
-                ApplyTaskbarSettings();
+                // Verify secondary monitor is still valid
+                if (g_secondaryMonitor && IsWindow(g_taskbarHwnd)) {
+                    g_fullscreenApp = hWnd;  // Track this app
+                    g_forceSecondary = true;
+                    ApplyTaskbarSettings();
+                } else {
+                    Log(L"ERROR: Secondary monitor or taskbar invalid, skipping move");
+                    RefreshMonitors(); // Try to recover
+                }
             }
         }
         
@@ -372,6 +410,7 @@ bool HookTaskbarSymbols() {
 void LoadSettings() {
     g_settings.secondaryMonitor = Wh_GetIntSetting(L"secondaryMonitor");
     g_settings.pollInterval = Wh_GetIntSetting(L"pollInterval");
+    g_settings.restartExplorerForDPI = Wh_GetIntSetting(L"restartExplorerForDPI");
     g_settings.enableLogging = Wh_GetIntSetting(L"enableLogging");
 }
 
